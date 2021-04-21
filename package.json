@@ -1,0 +1,11 @@
+{
+  "name": "aws-node-express-api",
+  "version": "1.0.0",
+  "description": "",
+  "dependencies": {
+    "aws-sdk": "^2.889.0",
+    "cuid": "^2.1.8",
+    "express": "^4.17.1",
+    "serverless-http": "^2.7.0"
+  }
+}
