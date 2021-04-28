@@ -1,4 +1,3 @@
-'use strict';
 const AWS = require("aws-sdk");
 const AWS_KEY = process.env.AWS_ACCESS_KEY_ID
 const AWS_SECRET = process.env.AWS_SECRET_ACCESS_KEY
@@ -19,7 +18,7 @@ const { body, validationResult } = require('express-validator');
 const ash = require('express-async-handler')
 app.use(express.json())
 
-async function initMultipartUpload(userId, extension, bucket) {
+async function initMultipartUpload(userId, bucket, extension) {
   const guid = cuid()
   const date = new Date()
   const y = date.getUTCFullYear()
@@ -44,7 +43,7 @@ async function initMultipartUpload(userId, extension, bucket) {
   }
 }
 
-async function generatePresignedUrlParts(uploadId, parts, bucket, key, expire) {
+async function generatePresignedUrlParts(uploadId, number, bucket, key, expire) {
   const params = {
     Bucket: bucket,
     // 上傳的檔案路徑名稱
@@ -55,7 +54,7 @@ async function generatePresignedUrlParts(uploadId, parts, bucket, key, expire) {
 
   let promises = []
 
-  for (let index = 0; index < parts; index++) {
+  for (let index = 0; index < number; index++) {
     promises.push(s3.getSignedUrlPromise('uploadPart', {
       ...params, PartNumber: index + 1
     }))
@@ -74,29 +73,61 @@ async function generatePresignedUrlParts(uploadId, parts, bucket, key, expire) {
   // }, {})
 }
 
-async function completeMultiUpload() {
-  const uploadId = "dyj5xp5Z2wbpzN6Xa7JC2h94F_stL2DO6oGHk6WHoRpRV1.D_UerWoecNI6QFN5idcoOQUWbvTZ_rzSIkZ.YC_9H8iJ8q_uvUdWgavQQPBBppaEMZejQriOQAaKCI5MSeF5i2yQyEvIDZylJl_nOdQ--"
+async function batchGeneratePresignedUrl(userId, number, bucket, extension, expire) {
+  const date = new Date()
+  const y = date.getUTCFullYear()
+  const m = date.getUTCMonth() + 1
+
+  let result = []
+  for (let i = 0; i < number; i++) {
+    let guid = cuid()
+    let filepath = util.format('%s/user/%s/files/%s/%s/%s.%s', ENVIROMENT, userId, y, m, guid, extension);
+    let params = {
+      Bucket: bucket,
+      // 上傳的檔案路徑名稱
+      Key: filepath,
+      Expires: expire
+    }
+
+    let url = s3.getSignedUrl('putObject', params)
+
+    let data = {
+      filepath: filepath,
+      url: url
+    }
+
+    result.push(data)
+  }
+
+  return result
+}
+
+async function completeMultiUpload(uploadId, bucket, filepath, parts) {
   const params = {
     Bucket: bucket,
-    Key: "test-presigned-upload.txt",
+    Key: filepath,
     UploadId: uploadId,
     MultipartUpload: {
-      Parts: [
-        {
-          "ETag": "474105cdbf393ec052b88d960dfc00f3",
-          "PartNumber": 1
-        },
-        {
-          "ETag": "d6a3eaee9a43c85c79355b742ea8be27",
-          "PartNumber": 2
-        }
-      ]
+      Parts: parts
+      // Parts: [
+      //   {
+      //     "ETag": "474105cdbf393ec052b88d960dfc00f3",
+      //     "PartNumber": 1
+      //   },
+      //   {
+      //     "ETag": "d6a3eaee9a43c85c79355b742ea8be27",
+      //     "PartNumber": 2
+      //   }
+      // ]
     }
   }
 
-  const res = await s3.completeMultipartUpload(params).promise()
-
-  return res
+  try {
+    const result = await s3.completeMultipartUpload(params).promise()
+    return result
+  } catch (err) {
+    throw err
+  }
 }
 
 // GeneratePresignedUrlParts
@@ -104,40 +135,77 @@ async function completeMultiUpload() {
 // 分段上傳檔案流程：
 // 1. 取得欲分段上傳檔案之 upload id
 // 2. 產生檔案的分段上傳連結
-app.post("/upload/gen-presigned-url-parts", body('user_id').isNumeric(), ash(async (req, res) => {
+// TODO User ID 驗證
+app.post("/v1/upload/gen-presigned-url-parts", body('user_id').isNumeric(), ash(async (req, res) => {
   const errors = validationResult(req);
   // TODO error response 調整
   if (!errors.isEmpty()) {
     return res.status(400).json({errors: errors.array()});
   }
 
-  const parts = req.body.parts
+  const number = req.body.number
   const extension = req.body.extension
   const userId = req.body.user_id
-  // 1. 取得欲分段上傳檔案之 upload id
-  const uploadData = await initMultipartUpload(userId, extension, INDOCHAT_BUCKET)
 
-  // 2. 產生檔案的分段上傳連結
-  const presignedUrls = await generatePresignedUrlParts(uploadData.upload_id, parts, INDOCHAT_BUCKET, uploadData.key, 6000)
-  return res.status(200).json(
-      {
-        'filepath': uploadData.key,
-        'urls': presignedUrls
-      }
-  );
+  try {
+    // 1. 取得欲分段上傳檔案之 upload id
+    const uploadData = await initMultipartUpload(userId, extension, INDOCHAT_BUCKET)
+    // 2. 產生檔案的分段上傳連結
+    const presignedUrls = await generatePresignedUrlParts(uploadData.upload_id, number, INDOCHAT_BUCKET, uploadData.key, 6000)
+    return res.status(200).json(
+        {
+          'upload_id': uploadData.upload_id,
+          'filepath': uploadData.key,
+          'urls': presignedUrls,
+        }
+    );
+  } catch (err) {
+    return res.status(500).json({
+      "errors": err.message
+    });
+  }
 }));
 
-app.get("/", (req, res, next) => {
-  return res.status(200).json({
-    message: "Hello from root!",
-  });
-});
+// CompleteMultiUpload
+// 完成分段上傳，上傳完各個分段上傳的檔案後，須通知 s3 將分段的檔案合而為一成原始檔案
+// TODO User ID 驗證
+app.post("/v1/upload/complete-multi-upload", ash(async (req, res) => {
+  const parts = req.body.parts
+  const userId = req.body.user_id
+  const filepath = req.body.filepath
+  const uploadId = req.body.upload_id
 
-app.get("/hello", (req, res, next) => {
-  return res.status(200).json({
-    message: "Hello from path!",
-  });
-});
+  try {
+    let result = await completeMultiUpload(uploadId, INDOCHAT_BUCKET, filepath, parts)
+    return res.status(200).json(result)
+  } catch (err) {
+    return res.status(err.statusCode).json({
+      'message': err.code
+    })
+  }
+}))
+
+app.post("/v1/upload/gen-presigned-url", ash(async (req, res) => {
+
+  try {
+    const result = await batchGeneratePresignedUrl(1, 1, INDOCHAT_BUCKET, "jpg", 60)
+    return res.status(200).json({})
+  } catch (err) {
+    return res.status(500).json({})
+  }
+}))
+
+// app.get("/", (req, res, next) => {
+//   return res.status(200).json({
+//     message: "Hello from root!",
+//   });
+// });
+//
+// app.get("/hello", (req, res, next) => {
+//   return res.status(200).json({
+//     message: "Hello from path!",
+//   });
+// });
 
 app.use((req, res, next) => {
   return res.status(404).json({
@@ -148,5 +216,6 @@ app.use((req, res, next) => {
 module.exports.initMultipartUpload = initMultipartUpload
 module.exports.generatePresignedUrlParts = generatePresignedUrlParts
 module.exports.completeMultiUpload = completeMultiUpload
+module.exports.generatePresingedUrl = batchGeneratePresignedUrl
 
 module.exports.handler = serverless(app);

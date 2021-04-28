@@ -17,3 +17,8 @@ test("complete multi upload", async () => {
     let res = await handler.completeMultiUpload()
     console.log(res)
 })
+
+test("Generate Presinged Url", async () => {
+    let res = await handler.generatePresingedUrl(1,"indochat-assets","jpg",60)
+    console.log(res)
+})
